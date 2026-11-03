@@ -23,10 +23,6 @@ environmentGroups:
           token:
             type: environment
             name: TENANT_TOKEN
-          oAuth:
-            clientId:
-              type: environment
-              name: CLIENT_ID
-            clientSecret:
-              type: environment
-              name: CLIENT_SECRET
+          platformToken:
+            type: environment
+            name: PLATFORM_TOKEN
