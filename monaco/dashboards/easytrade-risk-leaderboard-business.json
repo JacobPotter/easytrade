@@ -1,0 +1,150 @@
+{
+  "version": 15,
+  "variables": [],
+  "tiles": {
+    "0": {
+      "type": "markdown",
+      "content": "## 🚨 EasyTrade – High-Risk Service Leaderboard (business-aware)\nComposite **0–100** risk per service: business impact 0.20 · errors 0.20 · latency 0.20 · saturation 0.15 · Davis 0.15 · change 0.10, × blast-radius multiplier (dependents, trace share, business weight; revenue-path services = full business weight). Business impact = worst of request-volume drop, business error events, journey completion (deposit/withdraw/buy/sell). Compare with the original *EasyTrade - Service Risk Leaderboard*. 🔴 Broken · 🟠 Deteriorating · 🟡 Watch · 🟢 Recovering · ⚪ Stable. The leaderboard auto-detects the active cluster; the other tiles are pinned to `{{ .clusterUid }}`."
+    },
+    "1": {
+      "type": "data",
+      "title": "Ingest lag (s)",
+      "visualization": "singleValue",
+      "query": "fetch spans, from: now()-15m | filter k8s.namespace.name == \"easytrade\" | summarize last = max(start_time) | fieldsAdd lagSeconds = toLong((now() - last) / 1s) | fields lagSeconds"
+    },
+    "2": {
+      "type": "data",
+      "title": "Active Davis problems",
+      "visualization": "singleValue",
+      "query": "fetch dt.davis.problems, from: now()-24h | sort timestamp desc | dedup event.id | filter event.status == \"ACTIVE\" | summarize activeProblems = count()"
+    },
+    "3": {
+      "type": "data",
+      "title": "Failed requests, last 2h (%)",
+      "visualization": "singleValue",
+      "query": "timeseries {fail = sum(dt.service.request.failure_count, scalar:true), req = sum(dt.service.request.count, scalar:true)}, filter: k8s.cluster.uid == \"{{ .clusterUid }}\", from: now()-2h | fieldsAdd failPct = 100 * fail / req | fields failPct"
+    },
+    "4": {
+      "type": "data",
+      "title": "Ingress p95, last 2h (ms)",
+      "visualization": "singleValue",
+      "query": "timeseries p95 = percentile(dt.service.request.response_time, 95, scalar:true), filter: k8s.cluster.uid == \"{{ .clusterUid }}\" and k8s.workload.name == \"easytrade-frontendreverseproxy\", from: now()-2h | fieldsAdd p95ms = p95 / 1000 | fields p95ms"
+    },
+    "5": {
+      "type": "code",
+      "title": "High-Risk Service Leaderboard (business-aware)",
+      "visualization": "table",
+      "input": "{{ .tileCode }}"
+    },
+    "6": {
+      "type": "data",
+      "title": "p95 latency by service, 12h (ms)",
+      "visualization": "lineChart",
+      "query": "timeseries p95 = percentile(dt.service.request.response_time, 95), by:{k8s.workload.name}, filter: k8s.cluster.uid == \"{{ .clusterUid }}\", interval: 15m, from: now()-12h | fieldsAdd p95ms = p95[] / 1000 | fields timeframe, interval, k8s.workload.name, p95ms"
+    },
+    "7": {
+      "type": "data",
+      "title": "Failure rate by service, 12h (%)",
+      "visualization": "lineChart",
+      "query": "timeseries {req = sum(dt.service.request.count), fail = sum(dt.service.request.failure_count)}, by:{k8s.workload.name}, filter: k8s.cluster.uid == \"{{ .clusterUid }}\", interval: 15m, from: now()-12h | fieldsAdd failPct = 100 * fail[] / req[] | fields timeframe, interval, k8s.workload.name, failPct"
+    },
+    "8": {
+      "type": "data",
+      "title": "Failures by endpoint, 12h",
+      "visualization": "table",
+      "query": "fetch spans, from: now()-12h | filter k8s.cluster.uid == \"{{ .clusterUid }}\" and span.kind == \"server\" and request.is_failed == true | summarize {failures = count(), last = max(start_time)}, by:{k8s.workload.name, span.name, http.response.status_code} | sort failures desc | limit 25"
+    },
+    "9": {
+      "type": "data",
+      "title": "Log errors: baseline vs last 2h",
+      "visualization": "table",
+      "query": "fetch logs, from: now()-12h | filter k8s.namespace.name == \"easytrade\" and k8s.cluster.uid == \"{{ .clusterUid }}\" and in(loglevel, array(\"ERROR\", \"SEVERE\", \"FATAL\")) | fieldsAdd period = if(timestamp < now()-2h, \"baseline\", else: \"last 2h\") | summarize {errors = count(), sample = takeFirst(substring(content, to: 160))}, by:{k8s.workload.name, period} | sort k8s.workload.name asc"
+    },
+    "10": {
+      "type": "data",
+      "title": "Journey completion: baseline vs last 2h",
+      "visualization": "table",
+      "query": "fetch bizevents, from: now()-12h | filter event.provider == \"easytrade-frontendreverseproxy\" | fieldsAdd parts = splitString(event.type, \".\") | fieldsAdd journey = parts[2], stage = parts[3], period = if(timestamp < now()-2h, \"baseline\", else: \"last 2h\") | summarize {starts = countIf(stage == \"start\"), finishes = countIf(stage == \"finish\")}, by:{journey, period} | fieldsAdd completionPct = 100.0 * finishes / starts | sort journey asc, period asc"
+    },
+    "11": {
+      "type": "data",
+      "title": "Davis problems, 12h",
+      "visualization": "table",
+      "query": "fetch dt.davis.problems, from: now()-12h | sort timestamp desc | dedup event.id | fields display_id, event.name, event.status, event.start, event.end, affected_entity_ids, root_cause_entity_id | sort event.start desc"
+    }
+  },
+  "layouts": {
+    "0": {
+      "x": 0,
+      "y": 0,
+      "w": 24,
+      "h": 3
+    },
+    "1": {
+      "x": 0,
+      "y": 3,
+      "w": 6,
+      "h": 3
+    },
+    "2": {
+      "x": 6,
+      "y": 3,
+      "w": 6,
+      "h": 3
+    },
+    "3": {
+      "x": 12,
+      "y": 3,
+      "w": 6,
+      "h": 3
+    },
+    "4": {
+      "x": 18,
+      "y": 3,
+      "w": 6,
+      "h": 3
+    },
+    "5": {
+      "x": 0,
+      "y": 6,
+      "w": 24,
+      "h": 10
+    },
+    "6": {
+      "x": 0,
+      "y": 16,
+      "w": 12,
+      "h": 7
+    },
+    "7": {
+      "x": 12,
+      "y": 16,
+      "w": 12,
+      "h": 7
+    },
+    "8": {
+      "x": 0,
+      "y": 23,
+      "w": 12,
+      "h": 7
+    },
+    "9": {
+      "x": 12,
+      "y": 23,
+      "w": 12,
+      "h": 7
+    },
+    "10": {
+      "x": 0,
+      "y": 30,
+      "w": 12,
+      "h": 6
+    },
+    "11": {
+      "x": 12,
+      "y": 30,
+      "w": 12,
+      "h": 6
+    }
+  }
+}

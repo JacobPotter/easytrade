@@ -5,6 +5,7 @@ projects:
   - name: bizevents-processing-rules
   - name: bizflow
   - name: custom-service
+  - name: dashboards
   - name: management-zone
   - name: easytrade-validation
     path: easytrade-validation

@@ -22,6 +22,8 @@
   - _automation:workflows:run_
   - _automation:workflows:write_
   - _automation:workflows:read_
+  - _document:documents:read_
+  - _document:documents:write_
   - _settings:schemas:read_
   - _settings:objects:write_
   - _settings:objects:read_
@@ -34,6 +36,8 @@
   - **DOMAIN** - URL of EasyTrade used for application detection
   - **SLACK_TOKEN** - Slack bot token used in the Easytrade validation workflow
   - **SLACK_CHANNEL** - Slack channel ID used in the Easytrade validation workflow
+  - **EASYTRADE_CLUSTER_UID** - `k8s.cluster.uid` of the EasyTrade cluster, used by the context tiles of the risk leaderboard dashboard (the leaderboard tile itself auto-detects the cluster)
+    > Find it with `fetch spans, from: now()-15m | filter k8s.namespace.name == "easytrade" | summarize count(), by:{k8s.cluster.uid}`
 
 ## Warning
 

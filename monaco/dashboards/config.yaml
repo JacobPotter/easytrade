@@ -1,0 +1,33 @@
+configs:
+  - id: easytrade-risk-leaderboard
+    config:
+      name: EasyTrade - Service Risk Leaderboard
+      template: easytrade-risk-leaderboard.json
+      parameters:
+        clusterUid:
+          type: environment
+          name: EASYTRADE_CLUSTER_UID
+        tileCode:
+          type: file
+          path: risk-leaderboard-tile.js
+      skip: false
+    type:
+      document:
+        kind: dashboard
+        private: false
+  - id: easytrade-risk-leaderboard-business
+    config:
+      name: EasyTrade - Service Risk Leaderboard (business-aware)
+      template: easytrade-risk-leaderboard-business.json
+      parameters:
+        clusterUid:
+          type: environment
+          name: EASYTRADE_CLUSTER_UID
+        tileCode:
+          type: file
+          path: risk-leaderboard-business-tile.js
+      skip: false
+    type:
+      document:
+        kind: dashboard
+        private: false
