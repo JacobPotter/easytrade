@@ -1,0 +1,19 @@
+{
+  "$schema": "./.dt-app/app.config.schema.json",
+  "environmentUrl": "https://qfo72129.apps.dynatrace.com/",
+  "app": {
+    "name": "Risk Signals",
+    "version": "0.0.0",
+    "description": "EasyTrade high-risk service leaderboard: composite risk score per service from errors, latency, saturation, change recency and Davis problems",
+    "id": "my.risk.signals",
+    "scopes": [
+      { "name": "storage:buckets:read", "comment": "Read Grail buckets (required for any Grail query)" },
+      { "name": "storage:logs:read", "comment": "Log error counts and pod-to-workload mapping" },
+      { "name": "storage:spans:read", "comment": "Active cluster detection, trace share, service IDs, DB callers" },
+      { "name": "storage:metrics:read", "comment": "Request, failure, latency, process and OOM metrics" },
+      { "name": "storage:events:read", "comment": "Davis problems and deployment/configuration events" },
+      { "name": "storage:bizevents:read", "comment": "Feature-flag toggle business events" },
+      { "name": "storage:smartscape:read", "comment": "Smartscape pod nodes and service call edges" }
+    ]
+  }
+}
