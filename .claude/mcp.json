@@ -8,6 +8,11 @@
         "DT_ENVIRONMENT": "https://qfo72129.apps.dynatrace.com/",
         "DT_API_TOKEN": "${DT_API_TOKEN}"
       }
+    },
+    "dt-app-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "dt-app-mcp"]
     }
   }
 }
