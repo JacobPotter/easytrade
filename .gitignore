@@ -1,3 +1,6 @@
 .vscode/*
 !.vscode/mcp.json
 /dynakube.yaml
+
+.idea
+.junie
