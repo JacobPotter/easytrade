@@ -7,7 +7,7 @@ import { Sheet } from "@dynatrace/strato-components/overlays";
 import { SimpleTable, type SimpleTableColumnDef } from "@dynatrace/strato-components/tables";
 import { Heading, Paragraph, Strong, Text } from "@dynatrace/strato-components/typography";
 
-import { RISK_CONFIG, type EdgeSource, type RiskDependency, type RiskRow, type SignalKey } from "../risk/engine";
+import { RISK_CONFIG, type EdgeSource, type RiskDependency, type RiskRow, type SignalKey } from "../risk/riskContract";
 import { EVIDENCE, type EvidenceDef, type EvidenceScope } from "../risk/metricsQueries";
 import { MetricTile } from "./MetricTile";
 
@@ -43,7 +43,7 @@ interface MetricRow {
 interface MetricSection {
   key: SignalKey;
   title: string;
-  /** How the raw metrics map to the 0–1 signal (mirrors engine.ts) */
+  /** How the raw metrics map to the 0–1 signal (mirrors api/risk/engine.ts) */
   howScored: string;
   rows: MetricRow[];
   /** Per-service charts/tables shown under the metrics, each in a collapsed (lazily queried) section */
@@ -127,7 +127,7 @@ export const RiskBreakdownSheet = ({ row, window, evidence, clusterLabel, onDism
       row && evidence
         ? {
             clusterUid: row.cluster,
-            // The engine strips the namespace prefix from the workload name (engine.ts, row.service)
+            // The engine strips the namespace prefix from the workload name (api/risk/engine.ts, row.service)
             workload: `${RISK_CONFIG.namespace}-${row.service}`,
             ...evidence,
           }

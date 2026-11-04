@@ -1,204 +1,37 @@
 /**
  * EasyTrade Service Risk Signal Matrix: TypeScript port of the dashboard Code tile
  * monaco/dashboards/risk-leaderboard-tile.js (non-business-aware model).
+ * Runs server-side in the `computeRiskLeaderboard` app function (api/computeRiskLeaderboard.function.ts); the UI
+ * only calls that function. Config and public types live in ui/app/risk/riskContract.ts.
  *
- * The scoring logic is duplicated there: any change to weights, signals or classification
+ * The scoring logic is duplicated in the tile: any change to weights, signals or classification
  * must be applied to BOTH files. App-only differences (intentional, 2026-11-03):
  *   - the cluster scope and the baseline/compare windows are parameters (RiskParams), not auto-detected/fixed;
  *   - every query is grouped by k8s.cluster.uid and each cluster is scored independently, so the app can
  *     show one row per (cluster, service). Scoring one cluster gives the same numbers as the tile does;
  *   - each row also carries a `breakdown` (inputs and intermediate values for the Risk Breakdown view).
- *     It is output only and does not affect the score, so the tile does not need it.
+ *     It is output only and does not affect the score, so the tile does not need it;
+ *   - each row also carries a `serviceId` (the workload's service entity with the most spans, for linking to the
+ *     Services app). Also output only, taken from the existing service-ID mapping query.
  * Expected Grail scan per run: about 0.8 GB for one cluster at 24h; scales with window length.
  */
-import { numArr, numField, runDql, str, strArr, type ResultRecord } from "./dql";
+import { numArr, numField, str, strArr, type ResultRecord } from "../../ui/app/risk/dql";
+import {
+  DEFAULT_RISK_PARAMS,
+  RISK_CONFIG,
+  clusterCondition,
+  validateRiskParams,
+  type EdgeSource,
+  type RiskBreakdown,
+  type RiskDavisMatch,
+  type RiskDependency,
+  type RiskLeaderboard,
+  type RiskParams,
+  type RiskRow,
+  type SignalKey,
+} from "../../ui/app/risk/riskContract";
+import { runDql } from "./runDql";
 import { avg, median, minMax, nonNull, round, sum, trend, type Trend } from "./stats";
-
-/** db.system value on client spans -> workload that serves it */
-const DB_WORKLOADS: Readonly<Record<string, string | undefined>> = { mssql: "easytrade-db" };
-
-export const RISK_CONFIG = {
-  namespace: "easytrade",
-  lookbackHours: 24, // default baseline window (baseline + current)
-  currentHours: 2, // default compare window: most recent slice compared against the rest
-  bucketMinutes: 15,
-  traceWindowMinutes: 30, // trace share + service-ID mapping
-  oomHistoryDays: 7, // across all clusters (workload names carry over)
-  weights: { sat: 0.2, err: 0.25, lat: 0.2, chg: 0.15, davis: 0.2 },
-  changeDecayHours: 6,
-  infraProblemWeight: 0.25, // active problem on the host/cluster a service runs on
-  exclude: ["easytrade-loadgen"],
-  entrypoints: ["easytrade-frontendreverseproxy"],
-  dbWorkloads: DB_WORKLOADS,
-  // Calls Dynatrace cannot trace (verified in src/): async queue + untraced Go caller
-  extraEdges: [
-    ["easytrade-aggregator-service", "easytrade-offerservice"],
-    ["easytrade-pricing-service", "easytrade-rabbitmq"],
-    ["easytrade-rabbitmq", "easytrade-calculationservice"],
-  ],
-} as const satisfies {
-  exclude: readonly string[];
-  entrypoints: readonly string[];
-  extraEdges: readonly (readonly [string, string])[];
-  [k: string]: unknown;
-};
-
-/** User-selectable scope of a scoring run. */
-export interface RiskParams {
-  /** k8s.cluster.uid values to score; empty = every cluster with data in the window */
-  clusters: readonly string[];
-  /** Baseline window in hours, including the compare window (default 24) */
-  lookbackHours: number;
-  /** Compare window in hours: the most recent slice scored against the baseline (default 2) */
-  currentHours: number;
-}
-
-export const DEFAULT_RISK_PARAMS: RiskParams = {
-  clusters: [],
-  lookbackHours: RISK_CONFIG.lookbackHours,
-  currentHours: RISK_CONFIG.currentHours,
-};
-
-/** DQL condition selecting the given clusters; empty = any cluster. Uids are quoted, never interpolated raw. */
-export function clusterCondition(clusters: readonly string[]): string {
-  return clusters.length
-    ? `in(k8s.cluster.uid, array(${clusters.map((c) => JSON.stringify(c)).join(", ")}))`
-    : "isNotNull(k8s.cluster.uid)";
-}
-
-export type SignalKey = keyof typeof RISK_CONFIG.weights;
-
-/** How a dependency edge between two workloads was discovered. */
-export type EdgeSource = "traced call" | "database" | "untraced (configured)";
-
-export interface RiskDependency {
-  service: string;
-  via: EdgeSource;
-}
-
-export interface RiskDavisMatch {
-  displayId: string;
-  name: string;
-  status: string;
-  /** "service": the problem affects one of the service's own entities; "infrastructure": its host or cluster */
-  match: "service" | "infrastructure";
-  /** Davis signal (0–1) this problem contributes; the strongest one wins */
-  weight: number;
-}
-
-/**
- * Everything the score was computed from, for the Risk Breakdown view. Output only: it is
- * collected while scoring and never feeds back into the score.
- */
-export interface RiskBreakdown {
-  /** Per signal: weight, normalized signal 0–1 and weighted points (100·weight·signal) before the multiplier */
-  components: { key: SignalKey; label: string; weight: number; signal: number; points: number }[];
-  /** Sum of `components[].points` */
-  basePoints: number;
-  /** Blast-radius multiplier, 1 + 0.5·blast */
-  multiplier: number;
-  /** base × multiplier exceeded 100 and was capped */
-  capped: boolean;
-  errors: {
-    reqBase: number;
-    reqNow: number;
-    failRateBasePct: number;
-    failRateNowPct: number;
-    z: number;
-    /** Request-failure part of the error signal (z-score and absolute level), 0–1 */
-    reqSignal: number;
-    logBase: number;
-    logNow: number;
-    /** Error log lines expected in the compare window at the baseline rate (Poisson λ) */
-    logExpected: number;
-    zLog: number;
-  };
-  latency: {
-    p95BaseMs: number | null;
-    p95NowMs: number | null;
-    ratio: number | null;
-    trendWindow: string;
-    trendNow: string;
-  };
-  saturation: {
-    cpuPct: number;
-    /** CPU min-max normalized across the cluster's services, 0–1 */
-    cpuNorm: number;
-    memGrowthPct: number;
-    /** Memory growth min-max normalized across the cluster's services, 0–1 */
-    memNorm: number;
-    oomKills: number;
-    hosts: string[];
-  };
-  change: {
-    hoursAgo: number;
-    source: "deployment" | "feature flag" | "config/deploy event" | "none in window";
-  };
-  davis: RiskDavisMatch[];
-  blast: {
-    /** Blast radius 0–1 */
-    value: number;
-    tier: string;
-    isEntrypoint: boolean;
-    /** Transitive callers of this service, and the largest count in the cluster */
-    dependents: number;
-    maxDependents: number;
-    traceSharePct: number;
-    maxTraceSharePct: number;
-    /** Direct upstream services */
-    callers: RiskDependency[];
-    /** Direct downstream dependencies */
-    callees: RiskDependency[];
-    /** Every service that (transitively) calls this one */
-    transitiveDependents: string[];
-  };
-}
-
-/** One scored (cluster, service). The leaderboard columns are status, service, cluster, score, driver, trend, blast. */
-export interface RiskRow {
-  rank: number;
-  score: number;
-  service: string;
-  /** k8s.cluster.uid the service runs in */
-  cluster: string;
-  status: string;
-  primaryDriver: string;
-  trendLast2h: string;
-  trendWindow: string;
-  blastRadius: string;
-  p95BaseMs: number | null;
-  p95NowMs: number | null;
-  p95Ratio: number | null;
-  failRateNowPct: number | null;
-  failZ: number | null;
-  logErrBase: number;
-  logErrNow: number;
-  cpuPct: number | null;
-  memGrowthPct: number | null;
-  oomKills: number;
-  hoursSinceChange: number | null;
-  davis: string;
-  sSat: number | null;
-  sErr: number | null;
-  sLat: number | null;
-  sChg: number | null;
-  sDavis: number | null;
-  blastMult: number | null;
-  coverage: string;
-  breakdown: RiskBreakdown;
-}
-
-export interface RiskLeaderboard {
-  rows: RiskRow[];
-  /** k8s.cluster.uid values that had data and were scored */
-  clusters: string[];
-  /** Parameters this result was computed with */
-  params: RiskParams;
-  /** Human-readable scoring window */
-  window: string;
-  /** End of the scoring window (aligned to the bucket boundary) */
-  computedAt: Date;
-}
 
 interface ProcAgg {
   cpuCur: number;
@@ -276,18 +109,7 @@ interface Window {
 const WL = "k8s.workload.name";
 const CL = "k8s.cluster.uid";
 
-/** Validates the windows: whole 15-min buckets, compare at least 1h (trend needs ≥ 4 points) and ≤ half the baseline. */
-export function validateRiskParams(p: RiskParams): string | null {
-  const bucketH = RISK_CONFIG.bucketMinutes / 60;
-  if (!Number.isFinite(p.lookbackHours) || !Number.isFinite(p.currentHours)) return "Windows must be numbers.";
-  if (p.currentHours < 1) return "Compare window must be at least 1h.";
-  if (p.currentHours * 2 > p.lookbackHours) return "Compare window must be at most half the baseline window.";
-  if ((p.lookbackHours / bucketH) % 1 || (p.currentHours / bucketH) % 1) {
-    return `Windows must be whole multiples of ${RISK_CONFIG.bucketMinutes} min.`;
-  }
-  return null;
-}
-
+/** Runs every signal query and scores each cluster. Throws on invalid params or a failed query. */
 export async function computeRiskLeaderboard(
   params: RiskParams = DEFAULT_RISK_PARAMS,
   abortSignal?: AbortSignal,
@@ -390,7 +212,7 @@ export async function computeRiskLeaderboard(
     clusters,
     params,
     window: `${fmtTime(start)}–${fmtTime(end)} UTC (now = last ${currentHours}h)`,
-    computedAt: end,
+    computedAt: end.toISOString(),
   };
 }
 
@@ -411,6 +233,8 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
   }
   const svcToWl = new Map<string, string>();
   const wlSvcIds = new Map<string, Set<string>>();
+  // Per workload, the service ID with the most spans (ties: lexically smaller ID) -> RiskRow.serviceId
+  const primarySvc = new Map<string, { id: string; n: number }>();
   for (const r of d.svcMap) {
     const id = str(r, "dt.smartscape.service");
     const wl = str(r, WL);
@@ -419,6 +243,9 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
     const ids = wlSvcIds.get(wl) ?? new Set<string>();
     ids.add(id);
     wlSvcIds.set(wl, ids);
+    const n = numField(r, "n") ?? 0;
+    const best = primarySvc.get(wl);
+    if (!best || n > best.n || (n === best.n && id < best.id)) primarySvc.set(wl, { id, n });
   }
 
   const workloads = new Set([...podToWl.values()].filter((wl) => !excluded(wl)));
@@ -715,6 +542,7 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
     return {
       score,
       service: wl.replace(`${ns}-`, ""),
+      serviceId: primarySvc.get(wl)?.id ?? null,
       cluster: uid,
       status,
       primaryDriver: labels[driver],

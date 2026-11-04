@@ -3,7 +3,7 @@ import React, { createContext, useCallback, useContext, useMemo, useState, type 
 import { useDql } from "@dynatrace-sdk/react-hooks";
 
 import { str } from "./dql";
-import { DEFAULT_RISK_PARAMS, RISK_CONFIG, validateRiskParams, type RiskParams } from "./engine";
+import { DEFAULT_RISK_PARAMS, RISK_CONFIG, validateRiskParams, type RiskParams } from "./riskContract";
 
 /** A named baseline / compare window pair. Presets replace free-form windows (fewer combinations, no constraints to explain). */
 export interface WindowPreset {

@@ -1,7 +1,7 @@
 import { functions } from "@dynatrace-sdk/app-utils";
 
 import type { ServiceRiskAnalysis, ServiceRiskPayload } from "./analysisContract";
-import type { RiskRow } from "./engine";
+import type { RiskRow } from "./riskContract";
 
 export type { ServiceRiskPayload };
 

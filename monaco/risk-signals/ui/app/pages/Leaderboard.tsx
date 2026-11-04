@@ -16,15 +16,17 @@ import {
   type DataTableColumnSort,
   type DataTableColumnVisibilityState,
 } from "@dynatrace/strato-components/tables";
-import { Heading, Paragraph, Text } from "@dynatrace/strato-components/typography";
+import { Heading, Link, Paragraph, Text } from "@dynatrace/strato-components/typography";
 import Colors from "@dynatrace/strato-design-tokens/colors";
 import { AiIcon, AnalyticsIcon, RefreshIcon } from "@dynatrace/strato-icons";
 
 import { RiskBreakdownSheet, type BreakdownEvidenceWindow } from "../components/RiskBreakdownSheet";
+import { RiskHoneycomb } from "../components/RiskHoneycomb";
 
 import { analyzeServiceRisk, toRiskPayload } from "../risk/analysis";
-import { RISK_CONFIG, type RiskParams, type RiskRow } from "../risk/engine";
+import { RISK_CONFIG, type RiskParams, type RiskRow } from "../risk/riskContract";
 import { DEFAULT_PRESET, DEFAULT_PRESET_ID, presetName, useRiskFilters, type WindowPreset } from "../risk/RiskFiltersContext";
+import { serviceLink } from "../risk/serviceLink";
 import { useRiskLeaderboard } from "../risk/useRiskLeaderboard";
 
 const w = RISK_CONFIG.weights;
@@ -47,7 +49,8 @@ export const Leaderboard = () => {
   // The Cluster column only adds information when more than one cluster was scored.
   const multiCluster = (data?.clusters.length ?? 0) > 1;
   const defaultVisibility = useMemo<DataTableColumnVisibilityState>(
-    () => ({ rank: false, cluster: multiCluster }),
+    // Trend direction stays in the data (Risk Breakdown, Davis AI payload) but is not shown as a column.
+    () => ({ rank: false, trendLast2h: false, cluster: multiCluster }),
     [multiCluster],
   );
 
@@ -104,14 +107,14 @@ export const Leaderboard = () => {
       if (!data) return;
       closeAnalysis(); // one sheet at a time
       // Pin the evidence queries to this run's window (not "now"), so the charts match the scores.
-      const end = data.computedAt.getTime();
+      const end = Date.parse(data.computedAt);
       const { lookbackHours, currentHours } = data.params;
       setBreakdown({
         row,
         window: data.window,
         evidence: {
           from: new Date(end - lookbackHours * 3600000).toISOString(),
-          to: data.computedAt.toISOString(),
+          to: data.computedAt,
           split: new Date(end - currentHours * 3600000).toISOString(),
           currentHours,
         },
@@ -123,7 +126,21 @@ export const Leaderboard = () => {
   const columns = useMemo<DataTableColumnDef<RiskRow>[]>(
     () => [
       { id: "status", header: "Status", accessor: "status", width: "content" },
-      { id: "service", header: "Service Name", accessor: "service", width: "content" },
+      {
+        id: "service",
+        header: "Service Name",
+        accessor: "service", // sorting and download keep using the name
+        width: "content",
+        // Traced services link to the Services app (new tab keeps the leaderboard); untraced ones have no entity
+        cell: ({ rowData }) =>
+          rowData.serviceId ? (
+            <Link href={serviceLink(rowData.serviceId)} target="_blank" rel="noopener noreferrer">
+              {rowData.service}
+            </Link>
+          ) : (
+            <Text>{rowData.service}</Text>
+          ),
+      },
       { id: "cluster", header: "Cluster", accessor: (row) => clusterLabel(row.cluster), width: "content" },
       {
         id: "score",
@@ -201,6 +218,11 @@ export const Leaderboard = () => {
           <MessageContainer.Title>Could not compute the leaderboard</MessageContainer.Title>
           <MessageContainer.Description>{error.message}</MessageContainer.Description>
         </MessageContainer>
+      )}
+
+      {/* Empty finished results are covered by the table's empty state */}
+      {(isLoading || rows.length > 0) && (
+        <RiskHoneycomb rows={rows} loading={isLoading} multiCluster={multiCluster} clusterLabel={clusterLabel} />
       )}
 
       {/* width: "content" and the default visibility apply on first render only, so remount per result */}

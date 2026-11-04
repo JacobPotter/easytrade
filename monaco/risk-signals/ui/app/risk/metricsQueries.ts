@@ -5,7 +5,7 @@
  * Expected Grail scan: the timeseries blocks scan nothing. The span and log blocks scan only once their section is
  * expanded: about 0.3–0.4 GB each at 24h for one busy service; scales with the window.
  */
-import { RISK_CONFIG } from "./engine";
+import { RISK_CONFIG } from "./riskContract";
 
 const ns = RISK_CONFIG.namespace;
 

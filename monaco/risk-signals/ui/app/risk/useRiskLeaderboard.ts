@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { computeRiskLeaderboard, type RiskLeaderboard, type RiskParams } from "./engine";
+import { fetchRiskLeaderboard } from "./leaderboardClient";
+import type { RiskLeaderboard, RiskParams } from "./riskContract";
 
 export interface UseRiskLeaderboardResult {
   data: RiskLeaderboard | undefined;
@@ -7,13 +8,14 @@ export interface UseRiskLeaderboardResult {
   isLoading: boolean;
   /** Increments with every completed run; use as a React key to remount views sized to the data. */
   runId: number;
-  /** Re-runs every query; cancels a run that is still in flight. */
+  /** Re-runs the leaderboard; supersedes a run that is still in flight. */
   refresh: () => void;
 }
 
 /**
- * Runs the risk engine on mount, whenever `params` change, and on demand.
- * In-flight queries are aborted on unmount, on refresh and when params change.
+ * Fetches the leaderboard from the computeRiskLeaderboard app function on mount, whenever `params` change, and on
+ * demand. The in-flight call is aborted on unmount, on refresh and when params change, and its result is dropped.
+ * Aborting cancels the HTTP call only: DQL queries the function already started run to completion on the server.
  */
 export function useRiskLeaderboard(params: RiskParams): UseRiskLeaderboardResult {
   const [data, setData] = useState<RiskLeaderboard>();
@@ -33,7 +35,7 @@ export function useRiskLeaderboard(params: RiskParams): UseRiskLeaderboardResult
     setIsLoading(true);
     setError(undefined);
 
-    computeRiskLeaderboard(paramsRef.current, ac.signal)
+    fetchRiskLeaderboard(paramsRef.current, ac.signal)
       .then((result) => {
         if (ac.signal.aborted) return;
         setData(result);
