@@ -1,12 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@dynatrace/strato-components/buttons";
-import {
-  InformationOverlay,
-  Markdown,
-  MessageContainer,
-  ProgressCircle,
-} from "@dynatrace/strato-components/content";
+import { Markdown, MessageContainer, ProgressCircle } from "@dynatrace/strato-components/content";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Menu } from "@dynatrace/strato-components/navigation";
 import { Sheet } from "@dynatrace/strato-components/overlays";
@@ -16,35 +11,30 @@ import {
   type DataTableColumnSort,
   type DataTableColumnVisibilityState,
 } from "@dynatrace/strato-components/tables";
-import { Heading, Link, Paragraph, Text } from "@dynatrace/strato-components/typography";
+import { Heading, Link, Text } from "@dynatrace/strato-components/typography";
 import Colors from "@dynatrace/strato-design-tokens/colors";
-import { AiIcon, AnalyticsIcon, RefreshIcon } from "@dynatrace/strato-icons";
+import { AiIcon, AnalyticsIcon } from "@dynatrace/strato-icons";
 
 import { RiskBreakdownSheet, type BreakdownEvidenceWindow } from "../components/RiskBreakdownSheet";
-import { RiskHoneycomb } from "../components/RiskHoneycomb";
 
 import { analyzeServiceRisk, toRiskPayload } from "../risk/analysis";
-import { RISK_CONFIG, type RiskParams, type RiskRow } from "../risk/riskContract";
-import { DEFAULT_PRESET, DEFAULT_PRESET_ID, presetName, useRiskFilters, type WindowPreset } from "../risk/RiskFiltersContext";
+import type { RiskRow } from "../risk/riskContract";
+import { useRiskFilters } from "../risk/RiskFiltersContext";
 import { serviceLink } from "../risk/serviceLink";
-import { useRiskLeaderboard } from "../risk/useRiskLeaderboard";
-
-const w = RISK_CONFIG.weights;
-const windowText = (p: Pick<WindowPreset, "lookbackHours" | "currentHours">) =>
-  `${p.lookbackHours}h / last ${p.currentHours}h`;
-
-const modelSummary = (p: RiskParams, preset: WindowPreset) =>
-  `${presetName(preset)} window. Composite 0–100 risk per service and cluster: errors ${w.err} · latency ${w.lat} · saturation ${w.sat} · ` +
-  `change recency ${w.chg} · Davis ${w.davis}, × blast-radius multiplier (1–1.5). ` +
-  `Baseline = ${p.lookbackHours}h→${p.currentHours}h ago, current = last ${p.currentHours}h. ` +
-  `Each cluster is scored on its own (normalization and blast radius stay within the cluster).`;
+import type { UseRiskLeaderboardResult } from "../risk/useRiskLeaderboard";
 
 /** Rank is hidden but stays the default sort (rank 1 = highest risk first). */
 const DEFAULT_SORT: DataTableColumnSort[] = [{ id: "rank", desc: false }];
 
-export const Leaderboard = () => {
-  const { params, preset, clusterLabel } = useRiskFilters();
-  const { data, error, isLoading, runId, refresh } = useRiskLeaderboard(params);
+interface LeaderboardProps {
+  /** The page's scoring run (RiskSignals owns it, so the honeycomb and this table share one run). */
+  leaderboard: UseRiskLeaderboardResult;
+}
+
+/** Leaderboard table with per-row Risk Breakdown and Davis AI analysis sheets. */
+export const Leaderboard = ({ leaderboard }: LeaderboardProps) => {
+  const { clusterLabel } = useRiskFilters();
+  const { data, error, isLoading, runId } = leaderboard;
   const rows = useMemo(() => data?.rows ?? [], [data]);
   // The Cluster column only adds information when more than one cluster was scored.
   const multiCluster = (data?.clusters.length ?? 0) > 1;
@@ -176,54 +166,7 @@ export const Leaderboard = () => {
 
   return (
     <Flex flexDirection="column" gap={16}>
-      <Flex justifyContent="space-between" alignItems="flex-start">
-        <Flex flexDirection="column" gap={4}>
-          <Flex alignItems="center" gap={8}>
-            <Heading level={2}>Service Risk Leaderboard</Heading>
-            <InformationOverlay aria-label="How the risk score is calculated">
-              <InformationOverlay.Content>
-                <Paragraph>{modelSummary(params, preset)}</Paragraph>
-              </InformationOverlay.Content>
-            </InformationOverlay>
-          </Flex>
-          {data && (
-            <Text>
-              {data.clusters.length
-                ? `${data.clusters.length === 1 ? "Cluster" : "Clusters"}: ${data.clusters.map(clusterLabel).join(", ")}`
-                : "No cluster had data in the window"}{" "}
-              · {presetName(preset)} window {data.window}
-            </Text>
-          )}
-        </Flex>
-        <Button onClick={refresh} loading={isLoading} disabled={isLoading}>
-          <Button.Prefix>
-            <RefreshIcon />
-          </Button.Prefix>
-          Refresh
-        </Button>
-      </Flex>
-
-      {preset.id !== DEFAULT_PRESET_ID && (
-        <MessageContainer variant="neutral">
-          <MessageContainer.Description>
-            Scored with the <em>{presetName(preset)}</em> window ({windowText(preset)}): scores differ from the Risk
-            Leaderboard dashboard, which uses {windowText(DEFAULT_PRESET)}.
-            {preset.costHint && ` This window scans more data (${preset.costHint}).`}
-          </MessageContainer.Description>
-        </MessageContainer>
-      )}
-
-      {error && (
-        <MessageContainer variant="critical">
-          <MessageContainer.Title>Could not compute the leaderboard</MessageContainer.Title>
-          <MessageContainer.Description>{error.message}</MessageContainer.Description>
-        </MessageContainer>
-      )}
-
-      {/* Empty finished results are covered by the table's empty state */}
-      {(isLoading || rows.length > 0) && (
-        <RiskHoneycomb rows={rows} loading={isLoading} multiCluster={multiCluster} clusterLabel={clusterLabel} />
-      )}
+      <Heading level={3}>Service Risk Leaderboard</Heading>
 
       {/* width: "content" and the default visibility apply on first render only, so remount per result */}
       <DataTable

@@ -3,7 +3,7 @@
   "environmentUrl": "https://qfo72129.apps.dynatrace.com/",
   "app": {
     "name": "Service Risk Analysis",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "description": "Application Service Risk: composite risk score per service",
     "id": "my.risk.signals",
     "scopes": [

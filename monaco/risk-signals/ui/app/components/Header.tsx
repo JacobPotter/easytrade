@@ -8,7 +8,7 @@ export const Header = () => {
       <AppHeader.Navigation>
         <AppHeader.Logo as={Link} to="/" appName="Risk Signals" />
         <AppHeader.NavigationItem as={Link} to="/">
-          Service Risk Leaderboard
+          Service Risk Signals
         </AppHeader.NavigationItem>
       </AppHeader.Navigation>
     </AppHeader>

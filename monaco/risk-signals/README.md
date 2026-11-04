@@ -47,24 +47,39 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  main["main.tsx<br/>AppRoot + BrowserRouter"] --> App["App.tsx<br/>PageLayout · Header · route '/'"]
-  App --> Page["pages/RiskSignals.tsx"]
+  main["main.tsx<br/>AppRoot + BrowserRouter"] --> App["App.tsx<br/>PageLayout · route '/'"]
+  App --> Header["components/Header<br/>logo 'Risk Signals' · nav 'Service Risk Signals'"]
+  App --> Page["pages/RiskSignals.tsx<br/>RiskSignals"]
 
   subgraph State["Filter state: risk/RiskFiltersContext.tsx"]
     Provider["RiskFiltersProvider<br/>params (clusters, window preset)<br/>clusterOptions · clusterLabel()"]
   end
 
-  Page --> Provider
-  Provider --> FilterBar["components/RiskFilterBar<br/>cluster Select · window preset"]
-  Provider --> Board["pages/Leaderboard"]
+  Page -- "wraps in" --> Provider
+  Provider --> Content["RiskSignalsContent<br/>owns the single scoring run"]
 
-  subgraph View["Leaderboard view"]
-    Board --> Honeycomb["components/RiskHoneycomb<br/>one tile per row, colored by Status"]
-    Board --> Table["DataTable<br/>status · service · cluster · score · driver · blast radius"]
-    Table -- "row action: Risk Breakdown" --> Breakdown["components/RiskBreakdownSheet<br/>signal contributions · dependencies · Davis matches"]
-    Table -- "row action: Analyze Risk" --> AISheet["Sheet: Davis AI analysis<br/>(Markdown)"]
-    Breakdown --> Tiles["components/MetricTile × N<br/>SingleValue · TimeseriesChart · DataTable"]
+  subgraph View["Page body (top to bottom)"]
+    FilterBar["components/RiskFilterBar<br/>cluster Select · window preset"]
+    PageHeader["'Service Risk Signals' header<br/>info overlay · cluster/window subtitle · Refresh<br/>window notice · error message"]
+    Honeycomb["components/RiskHoneycomb<br/>one tile per row, colored by Status"]
+    Board["pages/Leaderboard<br/>'Service Risk Leaderboard' title"]
+    Table["DataTable<br/>status · service · cluster · score · driver · blast radius"]
+    Breakdown["components/RiskBreakdownSheet<br/>signal contributions · dependencies · Davis matches"]
+    AISheet["Sheet: Davis AI analysis<br/>(Markdown)"]
+    Tiles["components/MetricTile × N<br/>SingleValue · TimeseriesChart · DataTable"]
   end
+
+  Content --> FilterBar
+  Content --> PageHeader
+  Content -- "rows" --> Honeycomb
+  Content -- "leaderboard result (prop)" --> Board
+  Board --> Table
+  Table -- "row action: Risk Breakdown" --> Breakdown
+  Table -- "row action: Analyze Risk" --> AISheet
+  Breakdown --> Tiles
+
+  Provider -. "useRiskFilters()" .-> FilterBar
+  Provider -. "useRiskFilters()" .-> Board
 
   subgraph Data["Data access: risk/"]
     Hook["useRiskLeaderboard<br/>abortable run · refresh · runId"]
@@ -74,7 +89,8 @@ flowchart TB
     Link["serviceLink.ts<br/>Services app intent link"]
   end
 
-  Board --> Hook --> LClient
+  Content -- "useRiskFilters() → params" --> Hook --> LClient
+  PageHeader -- "Refresh" --> Hook
   AISheet --> AClient
   Tiles --> Evidence
   Table --> Link
@@ -85,13 +101,18 @@ flowchart TB
   Tiles -- "useDql" --> Grail
 ```
 
+- **`RiskSignals`** only wraps the page in `RiskFiltersProvider`. The body is the inner **`RiskSignalsContent`**,
+  because it has to read the filter context.
 - **`RiskFiltersProvider`** holds the only user input, `RiskParams` (selected clusters plus lookback and compare
   hours from a window preset). It also loads the cluster list with a cheap metrics query.
+- **`RiskSignalsContent`** calls **`useRiskLeaderboard`** once and shares the result: the honeycomb gets the
+  rows, and **`Leaderboard`** gets the whole result as a prop. Both views come from the same ~0.8 GB run, and
+  Refresh reloads both.
 - **`useRiskLeaderboard`** re-runs the scoring only when the parameter *values* change, aborts superseded runs,
   and exposes `refresh()`. `runId` increments per result so the table remounts with fresh defaults.
-- **Leaderboard** renders the honeycomb and table from the same `RiskRow[]`. Each row already carries its
-  `breakdown`, so the Risk Breakdown sheet needs no extra function call. Only its evidence charts query Grail,
-  and they are pinned to the run's window so they match the scores.
+- **`Leaderboard`** renders the table and the two row-action sheets. Each row already carries its `breakdown`,
+  so the Risk Breakdown sheet needs no extra function call. Only its evidence charts query Grail, and they are
+  pinned to the run's window so they match the scores.
 
 ### Backend architecture (app functions)
 
