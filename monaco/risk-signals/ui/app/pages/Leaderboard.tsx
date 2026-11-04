@@ -1,8 +1,15 @@
-import React, { useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@dynatrace/strato-components/buttons";
-import { InformationOverlay, MessageContainer } from "@dynatrace/strato-components/content";
+import {
+  InformationOverlay,
+  Markdown,
+  MessageContainer,
+  ProgressCircle,
+} from "@dynatrace/strato-components/content";
 import { Flex } from "@dynatrace/strato-components/layouts";
+import { Menu } from "@dynatrace/strato-components/navigation";
+import { Sheet } from "@dynatrace/strato-components/overlays";
 import {
   DataTable,
   type DataTableColumnDef,
@@ -11,15 +18,21 @@ import {
 } from "@dynatrace/strato-components/tables";
 import { Heading, Paragraph, Text } from "@dynatrace/strato-components/typography";
 import Colors from "@dynatrace/strato-design-tokens/colors";
-import { RefreshIcon } from "@dynatrace/strato-icons";
+import { AiIcon, AnalyticsIcon, RefreshIcon } from "@dynatrace/strato-icons";
 
+import { RiskBreakdownSheet, type BreakdownEvidenceWindow } from "../components/RiskBreakdownSheet";
+
+import { analyzeServiceRisk, toRiskPayload } from "../risk/analysis";
 import { RISK_CONFIG, type RiskParams, type RiskRow } from "../risk/engine";
-import { useRiskFilters } from "../risk/RiskFiltersContext";
+import { DEFAULT_PRESET, DEFAULT_PRESET_ID, presetName, useRiskFilters, type WindowPreset } from "../risk/RiskFiltersContext";
 import { useRiskLeaderboard } from "../risk/useRiskLeaderboard";
 
 const w = RISK_CONFIG.weights;
-const modelSummary = (p: RiskParams) =>
-  `Composite 0–100 risk per service and cluster: errors ${w.err} · latency ${w.lat} · saturation ${w.sat} · ` +
+const windowText = (p: Pick<WindowPreset, "lookbackHours" | "currentHours">) =>
+  `${p.lookbackHours}h / last ${p.currentHours}h`;
+
+const modelSummary = (p: RiskParams, preset: WindowPreset) =>
+  `${presetName(preset)} window. Composite 0–100 risk per service and cluster: errors ${w.err} · latency ${w.lat} · saturation ${w.sat} · ` +
   `change recency ${w.chg} · Davis ${w.davis}, × blast-radius multiplier (1–1.5). ` +
   `Baseline = ${p.lookbackHours}h→${p.currentHours}h ago, current = last ${p.currentHours}h. ` +
   `Each cluster is scored on its own (normalization and blast radius stay within the cluster).`;
@@ -28,7 +41,7 @@ const modelSummary = (p: RiskParams) =>
 const DEFAULT_SORT: DataTableColumnSort[] = [{ id: "rank", desc: false }];
 
 export const Leaderboard = () => {
-  const { params, clusterLabel } = useRiskFilters();
+  const { params, preset, clusterLabel } = useRiskFilters();
   const { data, error, isLoading, runId, refresh } = useRiskLeaderboard(params);
   const rows = useMemo(() => data?.rows ?? [], [data]);
   // The Cluster column only adds information when more than one cluster was scored.
@@ -36,6 +49,75 @@ export const Leaderboard = () => {
   const defaultVisibility = useMemo<DataTableColumnVisibilityState>(
     () => ({ rank: false, cluster: multiCluster }),
     [multiCluster],
+  );
+
+  // Davis AI analysis sheet
+  const [isOverlayOpen, setIsOverlayOpen] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<Error>();
+  const [analyzedRow, setAnalyzedRow] = useState<RiskRow>();
+  const analysisController = useRef<AbortController | null>(null);
+
+  // Risk breakdown sheet: the row plus the window of the run it came from, so a refresh keeps the snapshot consistent
+  const [breakdown, setBreakdown] = useState<{ row: RiskRow; window: string; evidence: BreakdownEvidenceWindow }>();
+  const closeBreakdown = useCallback(() => setBreakdown(undefined), []);
+
+  const onAnalyze = useCallback(
+    (row: RiskRow) => {
+      setBreakdown(undefined); // one sheet at a time
+      analysisController.current?.abort();
+      const ac = new AbortController();
+      analysisController.current = ac;
+      setAnalyzedRow(row);
+      setAnalysisResult("");
+      setAnalysisError(undefined);
+      setIsAnalyzing(true);
+      setIsOverlayOpen(true);
+
+      analyzeServiceRisk(toRiskPayload(row, clusterLabel(row.cluster)), ac.signal)
+        .then((text) => {
+          if (!ac.signal.aborted) setAnalysisResult(text);
+        })
+        .catch((err: unknown) => {
+          if (ac.signal.aborted) return;
+          console.error("Davis AI risk analysis failed", err);
+          setAnalysisError(err instanceof Error ? err : new Error(String(err)));
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setIsAnalyzing(false);
+        });
+    },
+    [clusterLabel],
+  );
+
+  const closeAnalysis = useCallback(() => {
+    analysisController.current?.abort();
+    setIsAnalyzing(false);
+    setIsOverlayOpen(false);
+  }, []);
+
+  useEffect(() => () => analysisController.current?.abort(), []);
+
+  const onBreakdown = useCallback(
+    (row: RiskRow) => {
+      if (!data) return;
+      closeAnalysis(); // one sheet at a time
+      // Pin the evidence queries to this run's window (not "now"), so the charts match the scores.
+      const end = data.computedAt.getTime();
+      const { lookbackHours, currentHours } = data.params;
+      setBreakdown({
+        row,
+        window: data.window,
+        evidence: {
+          from: new Date(end - lookbackHours * 3600000).toISOString(),
+          to: data.computedAt.toISOString(),
+          split: new Date(end - currentHours * 3600000).toISOString(),
+          currentHours,
+        },
+      });
+    },
+    [closeAnalysis, data],
   );
 
   const columns = useMemo<DataTableColumnDef<RiskRow>[]>(
@@ -80,10 +162,10 @@ export const Leaderboard = () => {
       <Flex justifyContent="space-between" alignItems="flex-start">
         <Flex flexDirection="column" gap={4}>
           <Flex alignItems="center" gap={8}>
-            <Heading level={2}>High-Risk Service Leaderboard</Heading>
+            <Heading level={2}>Service Risk Leaderboard</Heading>
             <InformationOverlay aria-label="How the risk score is calculated">
               <InformationOverlay.Content>
-                <Paragraph>{modelSummary(params)}</Paragraph>
+                <Paragraph>{modelSummary(params, preset)}</Paragraph>
               </InformationOverlay.Content>
             </InformationOverlay>
           </Flex>
@@ -92,7 +174,7 @@ export const Leaderboard = () => {
               {data.clusters.length
                 ? `${data.clusters.length === 1 ? "Cluster" : "Clusters"}: ${data.clusters.map(clusterLabel).join(", ")}`
                 : "No cluster had data in the window"}{" "}
-              · window {data.window}
+              · {presetName(preset)} window {data.window}
             </Text>
           )}
         </Flex>
@@ -103,6 +185,16 @@ export const Leaderboard = () => {
           Refresh
         </Button>
       </Flex>
+
+      {preset.id !== DEFAULT_PRESET_ID && (
+        <MessageContainer variant="neutral">
+          <MessageContainer.Description>
+            Scored with the <em>{presetName(preset)}</em> window ({windowText(preset)}): scores differ from the Risk
+            Leaderboard dashboard, which uses {windowText(DEFAULT_PRESET)}.
+            {preset.costHint && ` This window scans more data (${preset.costHint}).`}
+          </MessageContainer.Description>
+        </MessageContainer>
+      )}
 
       {error && (
         <MessageContainer variant="critical">
@@ -124,10 +216,60 @@ export const Leaderboard = () => {
         lineWrap
         rowId={(row) => `${row.cluster}/${row.service}`}
       >
+        {/* Row actions: add future per-row actions as Menu.Items here */}
+        <DataTable.RowActions>
+          {(row: RiskRow) => (
+            <Menu>
+              <Menu.Content>
+                <Menu.Item onSelect={() => onBreakdown(row)}>
+                  <Menu.Prefix>
+                    <AnalyticsIcon />
+                  </Menu.Prefix>
+                  Risk Breakdown
+                </Menu.Item>
+                <Menu.Item onSelect={() => onAnalyze(row)}>
+                  <Menu.Prefix>
+                    <AiIcon />
+                  </Menu.Prefix>
+                  Analyze Risk
+                </Menu.Item>
+              </Menu.Content>
+            </Menu>
+          )}
+        </DataTable.RowActions>
         <DataTable.EmptyState>
           {error ? "No data: see the error above." : "No services scored yet."}
         </DataTable.EmptyState>
       </DataTable>
+
+      <Sheet
+        title={analyzedRow ? `Risk analysis: ${analyzedRow.service}` : "Risk analysis"}
+        show={isOverlayOpen}
+        onDismiss={closeAnalysis}
+        actions={<Button onClick={closeAnalysis}>Close</Button>}
+      >
+        {isAnalyzing ? (
+          <Flex flexDirection="column" alignItems="center" gap={8} padding={32}>
+            <ProgressCircle aria-label="Davis AI is analyzing the service risk" />
+            <Text>Davis AI is analyzing the risk signals…</Text>
+          </Flex>
+        ) : analysisError ? (
+          <MessageContainer variant="critical">
+            <MessageContainer.Title>Risk analysis failed</MessageContainer.Title>
+            <MessageContainer.Description>{analysisError.message}</MessageContainer.Description>
+          </MessageContainer>
+        ) : (
+          <Markdown>{analysisResult}</Markdown>
+        )}
+      </Sheet>
+
+      <RiskBreakdownSheet
+        row={breakdown?.row}
+        window={breakdown?.window ?? ""}
+        evidence={breakdown?.evidence}
+        clusterLabel={clusterLabel}
+        onDismiss={closeBreakdown}
+      />
     </Flex>
   );
 };

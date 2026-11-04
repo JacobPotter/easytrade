@@ -1,14 +1,17 @@
 import React from "react";
 
+import { Chip } from "@dynatrace/strato-components/content";
 import { FilterBar } from "@dynatrace/strato-components/filters";
 import { Select } from "@dynatrace/strato-components/forms";
+import { Flex } from "@dynatrace/strato-components/layouts";
+import { Tooltip } from "@dynatrace/strato-components/overlays";
+import { Text } from "@dynatrace/strato-components/typography";
 
-import { BASELINE_OPTIONS, COMPARE_OPTIONS, useRiskFilters } from "../risk/RiskFiltersContext";
+import { WINDOW_PRESETS, useRiskFilters, type WindowPreset, type WindowPresetId } from "../risk/RiskFiltersContext";
 
-/** App-wide scope: clusters (none = all) and the baseline / compare windows. Applies to every tab. */
+/** App-wide scope: clusters (none = all) and the scoring window preset. Applies to every tab. */
 export const RiskFilterBar = () => {
-  const { params, setClusters, setLookbackHours, setCurrentHours, reset, clusterOptions, clusterOptionsLoading } =
-    useRiskFilters();
+  const { params, setClusters, preset, setPreset, reset, clusterOptions, clusterOptionsLoading } = useRiskFilters();
 
   return (
     <FilterBar
@@ -33,33 +36,27 @@ export const RiskFilterBar = () => {
           </Select.Content>
         </Select>
       </FilterBar.Item>
-      <FilterBar.Item name="baseline" label="Baseline window">
-        <Select<number, false>
-          value={params.lookbackHours}
+      <FilterBar.Item name="window" label="Scoring window">
+        <Select<WindowPresetId, false>
+          value={preset.id}
           onChange={(v) => {
-            if (v !== null) setLookbackHours(v);
+            if (v !== null) setPreset(v);
           }}
         >
-          <Select.Content>
-            {BASELINE_OPTIONS.map((h) => (
-              <Select.Option key={h} value={h}>
-                {`Last ${h}h`}
-              </Select.Option>
-            ))}
-          </Select.Content>
-        </Select>
-      </FilterBar.Item>
-      <FilterBar.Item name="compare" label="Compare window">
-        <Select<number, false>
-          value={params.currentHours}
-          onChange={(v) => {
-            if (v !== null) setCurrentHours(v);
-          }}
-        >
-          <Select.Content>
-            {COMPARE_OPTIONS.map((h) => (
-              <Select.Option key={h} value={h} disabled={h * 2 > params.lookbackHours}>
-                {`Last ${h}h`}
+          <Select.Trigger>
+            <Select.DisplayValue>{preset.label}</Select.DisplayValue>
+          </Select.Trigger>
+          {/* Wider than the trigger so the cost-hint Chip is not clipped */}
+          <Select.Content width="max-content">
+            {/* Select.Option has no description slot; show it as a tooltip */}
+            {WINDOW_PRESETS.map((w: WindowPreset) => (
+              <Select.Option key={w.id} value={w.id} textValue={w.label}>
+                <Tooltip text={w.description} placement="right">
+                  <Flex alignItems="center" gap={8} width="100%">
+                    <Text>{w.label}</Text>
+                    {w.costHint && <Chip size="condensed">{w.costHint}</Chip>}
+                  </Flex>
+                </Tooltip>
               </Select.Option>
             ))}
           </Select.Content>

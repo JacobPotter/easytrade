@@ -6,7 +6,9 @@
  * must be applied to BOTH files. App-only differences (intentional, 2026-11-03):
  *   - the cluster scope and the baseline/compare windows are parameters (RiskParams), not auto-detected/fixed;
  *   - every query is grouped by k8s.cluster.uid and each cluster is scored independently, so the app can
- *     show one row per (cluster, service). Scoring one cluster gives the same numbers as the tile does.
+ *     show one row per (cluster, service). Scoring one cluster gives the same numbers as the tile does;
+ *   - each row also carries a `breakdown` (inputs and intermediate values for the Risk Breakdown view).
+ *     It is output only and does not affect the score, so the tile does not need it.
  * Expected Grail scan per run: about 0.8 GB for one cluster at 24h; scales with window length.
  */
 import { numArr, numField, runDql, str, strArr, type ResultRecord } from "./dql";
@@ -64,7 +66,93 @@ export function clusterCondition(clusters: readonly string[]): string {
     : "isNotNull(k8s.cluster.uid)";
 }
 
-type SignalKey = keyof typeof RISK_CONFIG.weights;
+export type SignalKey = keyof typeof RISK_CONFIG.weights;
+
+/** How a dependency edge between two workloads was discovered. */
+export type EdgeSource = "traced call" | "database" | "untraced (configured)";
+
+export interface RiskDependency {
+  service: string;
+  via: EdgeSource;
+}
+
+export interface RiskDavisMatch {
+  displayId: string;
+  name: string;
+  status: string;
+  /** "service": the problem affects one of the service's own entities; "infrastructure": its host or cluster */
+  match: "service" | "infrastructure";
+  /** Davis signal (0–1) this problem contributes; the strongest one wins */
+  weight: number;
+}
+
+/**
+ * Everything the score was computed from, for the Risk Breakdown view. Output only: it is
+ * collected while scoring and never feeds back into the score.
+ */
+export interface RiskBreakdown {
+  /** Per signal: weight, normalized signal 0–1 and weighted points (100·weight·signal) before the multiplier */
+  components: { key: SignalKey; label: string; weight: number; signal: number; points: number }[];
+  /** Sum of `components[].points` */
+  basePoints: number;
+  /** Blast-radius multiplier, 1 + 0.5·blast */
+  multiplier: number;
+  /** base × multiplier exceeded 100 and was capped */
+  capped: boolean;
+  errors: {
+    reqBase: number;
+    reqNow: number;
+    failRateBasePct: number;
+    failRateNowPct: number;
+    z: number;
+    /** Request-failure part of the error signal (z-score and absolute level), 0–1 */
+    reqSignal: number;
+    logBase: number;
+    logNow: number;
+    /** Error log lines expected in the compare window at the baseline rate (Poisson λ) */
+    logExpected: number;
+    zLog: number;
+  };
+  latency: {
+    p95BaseMs: number | null;
+    p95NowMs: number | null;
+    ratio: number | null;
+    trendWindow: string;
+    trendNow: string;
+  };
+  saturation: {
+    cpuPct: number;
+    /** CPU min-max normalized across the cluster's services, 0–1 */
+    cpuNorm: number;
+    memGrowthPct: number;
+    /** Memory growth min-max normalized across the cluster's services, 0–1 */
+    memNorm: number;
+    oomKills: number;
+    hosts: string[];
+  };
+  change: {
+    hoursAgo: number;
+    source: "deployment" | "feature flag" | "config/deploy event" | "none in window";
+  };
+  davis: RiskDavisMatch[];
+  blast: {
+    /** Blast radius 0–1 */
+    value: number;
+    tier: string;
+    isEntrypoint: boolean;
+    /** Transitive callers of this service, and the largest count in the cluster */
+    dependents: number;
+    maxDependents: number;
+    traceSharePct: number;
+    maxTraceSharePct: number;
+    /** Direct upstream services */
+    callers: RiskDependency[];
+    /** Direct downstream dependencies */
+    callees: RiskDependency[];
+    /** Every service that (transitively) calls this one */
+    transitiveDependents: string[];
+  };
+}
 
 /** One scored (cluster, service). The leaderboard columns are status, service, cluster, score, driver, trend, blast. */
 export interface RiskRow {
@@ -97,6 +185,7 @@ export interface RiskRow {
   sDavis: number | null;
   blastMult: number | null;
   coverage: string;
+  breakdown: RiskBreakdown;
 }
 
 export interface RiskLeaderboard {
@@ -120,9 +209,14 @@ interface ProcAgg {
 
 interface Signals {
   traced: boolean;
+  nb: number;
+  nc: number;
+  p0: number;
   pc: number;
   z: number;
+  errReq: number;
   le: { base: number; cur: number };
+  lambda: number;
   zLog: number;
   err: number;
   p95Base: number | null;
@@ -131,14 +225,19 @@ interface Signals {
   lat: number;
   cpu: number;
   memGrowth: number;
+  hosts: string[];
   ooms: number;
   changeHrs: number;
+  changeSource: RiskBreakdown["change"]["source"];
   chg: number;
   davis: number;
   davisIds: string[];
+  davisMatches: RiskDavisMatch[];
   share: number;
   blast: number;
   sat: number;
+  cpuNorm: number;
+  memNorm: number;
   full: Trend;
   cur: Trend;
 }
@@ -389,22 +488,23 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
   }
 
   // Topology and blast radius (within this cluster)
-  const adj = new Map(W.map((wl) => [wl, new Set<string>()]));
-  const addEdge = (a: string | undefined, b: string | undefined) => {
-    if (a && b && a !== b && adj.has(a) && adj.has(b)) adj.get(a)?.add(b);
+  // adj: caller -> callee -> how the edge was found (first source wins, in the order added below)
+  const adj = new Map(W.map((wl) => [wl, new Map<string, EdgeSource>()]));
+  const addEdge = (a: string | undefined, b: string | undefined, via: EdgeSource) => {
+    if (a && b && a !== b && adj.has(a) && adj.has(b) && !adj.get(a)?.has(b)) adj.get(a)?.set(b, via);
   };
   for (const e of shared.edges) {
     const src = str(e, "source_id");
     const tgt = str(e, "target_id");
-    addEdge(src ? svcToWl.get(src) : undefined, tgt ? svcToWl.get(tgt) : undefined);
+    addEdge(src ? svcToWl.get(src) : undefined, tgt ? svcToWl.get(tgt) : undefined, "traced call");
   }
   for (const r of d.dbCalls) {
     const sys = str(r, "db.system");
-    addEdge(str(r, WL), sys ? CONFIG.dbWorkloads[sys] : undefined);
+    addEdge(str(r, WL), sys ? CONFIG.dbWorkloads[sys] : undefined, "database");
   }
-  for (const [a, b] of CONFIG.extraEdges) addEdge(a, b);
+  for (const [a, b] of CONFIG.extraEdges) addEdge(a, b, "untraced (configured)");
   const callers = new Map(W.map((wl) => [wl, new Set<string>()]));
-  for (const [a, outs] of adj) for (const b of outs) callers.get(b)?.add(a);
+  for (const [a, outs] of adj) for (const b of outs.keys()) callers.get(b)?.add(a);
   const dependents = (wl: string) => {
     const seen = new Set<string>();
     const stack = [wl];
@@ -417,9 +517,10 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
         }
       }
     }
-    return seen.size;
+    return seen;
   };
-  const deps = new Map(W.map((wl) => [wl, dependents(wl)]));
+  const depSets = new Map(W.map((wl) => [wl, dependents(wl)]));
+  const deps = new Map(W.map((wl) => [wl, depSets.get(wl)?.size ?? 0]));
   const maxDeps = Math.max(1, ...deps.values());
   const maxShare = Math.max(1e-9, ...W.map((wl) => (tracesBy.get(wl) ?? 0) / totalTraces));
 
@@ -454,14 +555,22 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
     // Change recency
     const pr = procBy.get(wl);
     const deployHrs = pr && pr.firstIdx > 0 ? (nBuckets - pr.firstIdx) * (B / 60) : lookbackHours;
-    const changeHrs = Math.min(deployHrs, flagHrs, evtHrs.get(wl) ?? Infinity);
+    const wlEvtHrs = evtHrs.get(wl) ?? Infinity;
+    const changeHrs = Math.min(deployHrs, flagHrs, wlEvtHrs);
     const chg = Math.exp(-changeHrs / CONFIG.changeDecayHours);
+    // Which input won the Math.min above; a pod that predates the window counts as "no change"
+    const changeSource: RiskBreakdown["change"]["source"] =
+      changeHrs === wlEvtHrs ? "config/deploy event"
+        : changeHrs === flagHrs ? "feature flag"
+          : pr && pr.firstIdx > 0 ? "deployment"
+            : "none in window";
 
     // Davis
     const ids = wlSvcIds.get(wl) ?? new Set<string>();
     const infra = new Set([...(pr?.hosts ?? []), ...clusterIds]);
     let davis = 0;
     const davisIds: string[] = [];
+    const davisMatches: RiskDavisMatch[] = [];
     for (const p of shared.problems) {
       const rootCause = str(p, "root_cause_entity_id");
       const affected = new Set([...strArr(p, "affected_entity_ids"), ...(rootCause ? [rootCause] : [])]);
@@ -469,12 +578,23 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
       const endIso = str(p, "event.end");
       const recent = activeNow || (!!endIso && new Date(endIso) >= split);
       let s = 0;
+      let match: RiskDavisMatch["match"] = "service";
       if ([...ids].some((id) => affected.has(id))) s = activeNow ? 1 : recent ? 0.6 : 0.3;
       else if ([...infra].some((id) => affected.has(id))) {
         s = activeNow ? CONFIG.infraProblemWeight : recent ? CONFIG.infraProblemWeight / 2 : 0;
+        match = "infrastructure";
       }
       const displayId = str(p, "display_id");
-      if (s > 0 && displayId) davisIds.push(displayId);
+      if (s > 0 && displayId) {
+        davisIds.push(displayId);
+        davisMatches.push({
+          displayId,
+          name: str(p, "event.name") ?? "",
+          status: str(p, "event.status") ?? "",
+          match,
+          weight: s,
+        });
+      }
       davis = Math.max(davis, s);
     }
 
@@ -484,11 +604,12 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
       : 0.5 * ((deps.get(wl) ?? 0) / maxDeps) + 0.5 * (share / maxShare);
 
     sig.set(wl, {
-      traced: !!r, pc, z, le, zLog, err, p95Base, p95Cur, latRatio, lat,
+      traced: !!r, nb, nc, p0, pc, z, errReq, le, lambda, zLog, err, p95Base, p95Cur, latRatio, lat,
       cpu: pr?.cpuCur ?? 0,
       memGrowth: pr && Number.isFinite(pr.memGrowth) ? pr.memGrowth : 0,
-      ooms: oomBy.get(wl) ?? 0, changeHrs, chg, davis, davisIds, share, blast,
-      sat: 0, // set below, needs normalization across the cluster
+      hosts: [...(pr?.hosts ?? [])].sort(),
+      ooms: oomBy.get(wl) ?? 0, changeHrs, changeSource, chg, davis, davisIds, davisMatches, share, blast,
+      sat: 0, cpuNorm: 0, memNorm: 0, // set below, need normalization across the cluster
       full: trend(p95), cur: trend(p95.slice(splitIdx)),
     });
   }
@@ -499,7 +620,9 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
   const memN = minMax(new Map(W.map((wl) => [wl, Math.max(0, signalsOf(wl).memGrowth)])));
   for (const wl of W) {
     const s = signalsOf(wl);
-    s.sat = Math.min(1, 0.4 * (cpuN.get(wl) ?? 0) + 0.4 * (memN.get(wl) ?? 0) + 0.5 * (s.ooms > 0 ? 1 : 0));
+    s.cpuNorm = cpuN.get(wl) ?? 0;
+    s.memNorm = memN.get(wl) ?? 0;
+    s.sat = Math.min(1, 0.4 * s.cpuNorm + 0.4 * s.memNorm + 0.5 * (s.ooms > 0 ? 1 : 0));
   }
 
   // Score, classify, explain
@@ -537,6 +660,58 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
     const arrow = cur.pct === null ? "–" : curT >= 2 ? "📈" : curT <= -2 ? "📉" : curPct > 10 ? "↗️" : curPct < -10 ? "↘️" : "➡️";
     const tier = s.blast >= 0.75 ? "Critical" : s.blast >= 0.4 ? "High" : s.blast >= 0.2 ? "Medium" : "Low";
 
+    const short = (w: string) => w.replace(`${ns}-`, "");
+    const byName = (a: RiskDependency, b: RiskDependency) => a.service.localeCompare(b.service);
+    const signalOf: Record<SignalKey, number> = { sat: s.sat, err: s.err, lat: s.lat, chg: s.chg, davis: s.davis };
+    const components = (Object.keys(parts) as SignalKey[]).map((key) => ({
+      key,
+      label: labels[key],
+      weight: wt[key],
+      signal: round(signalOf[key], 3) ?? 0,
+      points: round(100 * parts[key], 1) ?? 0,
+    }));
+    const basePoints = 100 * Object.values(parts).reduce((a, b) => a + b, 0);
+    const breakdown: RiskBreakdown = {
+      components,
+      basePoints: round(basePoints, 1) ?? 0,
+      multiplier: round(mult, 2) ?? 1,
+      capped: basePoints * mult > 100,
+      errors: {
+        reqBase: s.nb, reqNow: s.nc,
+        failRateBasePct: round(s.p0 * 100, 3) ?? 0, failRateNowPct: round(s.pc * 100, 3) ?? 0,
+        z: round(s.z, 2) ?? 0, reqSignal: round(s.errReq, 3) ?? 0,
+        logBase: s.le.base, logNow: s.le.cur, logExpected: round(s.lambda, 1) ?? 0, zLog: round(s.zLog, 2) ?? 0,
+      },
+      latency: {
+        p95BaseMs: round(s.p95Base), p95NowMs: round(s.p95Cur), ratio: round(s.latRatio, 2),
+        trendWindow: full.pct === null ? "n/a" : `${fmt(round(full.pct))}% (t ${fmt(round(full.t))})`,
+        trendNow: cur.pct === null ? "n/a" : `${fmt(round(cur.pct))}% (t ${fmt(round(cur.t))})`,
+      },
+      saturation: {
+        cpuPct: round(s.cpu, 3) ?? 0, cpuNorm: round(s.cpuNorm, 3) ?? 0,
+        memGrowthPct: round(s.memGrowth) ?? 0, memNorm: round(s.memNorm, 3) ?? 0,
+        oomKills: s.ooms, hosts: s.hosts,
+      },
+      change: { hoursAgo: round(s.changeHrs) ?? 0, source: s.changeSource },
+      davis: s.davisMatches,
+      blast: {
+        value: round(s.blast, 3) ?? 0,
+        tier,
+        isEntrypoint: (CONFIG.entrypoints as readonly string[]).includes(wl),
+        dependents: deps.get(wl) ?? 0,
+        maxDependents: maxDeps,
+        traceSharePct: round(s.share * 100, 1) ?? 0,
+        maxTraceSharePct: round(maxShare * 100, 1) ?? 0,
+        callers: [...(callers.get(wl) ?? [])]
+          .map((c) => ({ service: short(c), via: adj.get(c)?.get(wl) ?? "traced call" }))
+          .sort(byName),
+        callees: [...(adj.get(wl) ?? new Map<string, EdgeSource>())]
+          .map(([c, via]) => ({ service: short(c), via }))
+          .sort(byName),
+        transitiveDependents: [...(depSets.get(wl) ?? [])].map(short).sort(),
+      },
+    };
+
     return {
       score,
       service: wl.replace(`${ns}-`, ""),
@@ -553,6 +728,7 @@ function scoreCluster(uid: string, d: ClusterData, shared: SharedData, w: Window
       sSat: round(s.sat, 2), sErr: round(s.err, 2), sLat: round(s.lat, 2), sChg: round(s.chg, 2), sDavis: round(s.davis, 2),
       blastMult: round(mult, 2),
       coverage: s.traced ? "traces+metrics+logs" : "metrics+logs only",
+      breakdown,
     };
   });
 }

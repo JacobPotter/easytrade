@@ -8,12 +8,14 @@ import { Heading } from "@dynatrace/strato-components/typography";
 import { useDql } from "@dynatrace-sdk/react-hooks";
 
 import { toNum } from "../risk/dql";
-import type { MetricScope, MetricTileDef } from "../risk/metricsQueries";
+import type { MetricTileDef } from "../risk/metricsQueries";
 
-interface MetricTileProps {
-  def: MetricTileDef;
-  /** App-wide cluster scope and windows (from RiskFiltersContext) */
-  scope: MetricScope;
+interface MetricTileProps<S> {
+  def: MetricTileDef<S>;
+  /** Scope the def's title and query are built from (app-wide filters, or one service in the breakdown) */
+  scope: S;
+  /** Render the body only, without the Surface and heading (e.g. inside an Accordion section) */
+  bare?: boolean;
 }
 
 const SINGLE_VALUE_HEIGHT = 80;
@@ -22,13 +24,13 @@ const CHART_HEIGHT = 280;
 const TABLE_HEIGHT = 360;
 
 /** One dashboard tile: runs its DQL and renders it as a single value, line chart or table. */
-export const MetricTile = ({ def, scope }: MetricTileProps) => {
+export const MetricTile = <S,>({ def, scope, bare = false }: MetricTileProps<S>) => {
   const title = def.title(scope);
   // useDql re-runs whenever the query text changes, i.e. when the filters change.
   const { data, error, isLoading } = useDql({ query: def.query(scope) });
 
   useEffect(() => {
-    if (error) console.error(`Risk Metrics tile "${title}" failed`, error);
+    if (error) console.error(`Metric tile "${title}" failed`, error);
   }, [error, title]);
 
   const timeseries = useMemo(
@@ -76,13 +78,18 @@ export const MetricTile = ({ def, scope }: MetricTileProps) => {
   const bodyHeight =
     def.kind === "single" ? SINGLE_VALUE_HEIGHT : def.kind === "line" ? CHART_HEIGHT : TABLE_HEIGHT;
 
+  const sized = (
+    <Flex flexDirection="column" height={error ? undefined : bodyHeight} flexShrink={0}>
+      {body}
+    </Flex>
+  );
+  if (bare) return sized;
+
   return (
     <Surface padding={16}>
       <Flex flexDirection="column" gap={8}>
         <Heading level={5}>{title}</Heading>
-        <Flex flexDirection="column" height={error ? undefined : bodyHeight} flexShrink={0}>
-          {body}
-        </Flex>
+        {sized}
       </Flex>
     </Surface>
   );

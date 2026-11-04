@@ -2,9 +2,9 @@
   "$schema": "./.dt-app/app.config.schema.json",
   "environmentUrl": "https://qfo72129.apps.dynatrace.com/",
   "app": {
-    "name": "Risk Signals",
-    "version": "0.0.0",
-    "description": "EasyTrade high-risk service leaderboard: composite risk score per service from errors, latency, saturation, change recency and Davis problems",
+    "name": "Service Risk Analysis",
+    "version": "1.0.1",
+    "description": "Application Service Risk: composite risk score per service",
     "id": "my.risk.signals",
     "scopes": [
       { "name": "storage:buckets:read", "comment": "Read Grail buckets (required for any Grail query)" },
@@ -13,7 +13,10 @@
       { "name": "storage:metrics:read", "comment": "Request, failure, latency, process and OOM metrics" },
       { "name": "storage:events:read", "comment": "Davis problems and deployment/configuration events" },
       { "name": "storage:bizevents:read", "comment": "Feature-flag toggle business events" },
-      { "name": "storage:smartscape:read", "comment": "Smartscape pod nodes and service call edges" }
+      { "name": "storage:smartscape:read", "comment": "Smartscape pod nodes and service call edges" },
+      { "name": "app-engine:functions:run", "comment": "Call the analyzeServiceRisk app function" },
+      { "name":   "automation:workflows:run", "comment": "" },
+      { "name": "davis-copilot:conversations:execute", "comment": "Davis CoPilot risk analysis in analyzeServiceRisk" }
     ]
   }
 }

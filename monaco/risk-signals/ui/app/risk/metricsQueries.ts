@@ -1,137 +1,83 @@
 /**
- * DQL for the "Risk Metrics" tab: the context tiles of monaco/dashboards/easytrade-risk-leaderboard.json,
- * parameterized by the app-wide scope (RiskFiltersContext) instead of the dashboard's fixed cluster and windows:
- *   - cluster filter: the selected clusters, or every cluster when none is selected;
- *   - "last 2h" tiles use the compare window; "12h" tiles use the baseline window;
- *   - when more than one cluster is in scope, charts and tables are split by a "cluster" label (name · uid prefix).
- * Expected Grail scan per load: about 0.3 GB at 24h for one cluster (failed spans + error logs); scales with the window.
+ * DQL behind the per-service evidence in the Risk Breakdown sheet, adapted from the context tiles of
+ * monaco/dashboards/easytrade-risk-leaderboard.json. Each query is pinned to one cluster and workload and to the
+ * exact window of the scoring run the row came from, so the charts match the scores.
+ * Expected Grail scan: the timeseries blocks scan nothing. The span and log blocks scan only once their section is
+ * expanded: about 0.3–0.4 GB each at 24h for one busy service; scales with the window.
  */
-import { clusterCondition, RISK_CONFIG, type RiskParams } from "./engine";
+import { RISK_CONFIG } from "./engine";
 
 const ns = RISK_CONFIG.namespace;
 
 export type MetricKind = "single" | "line" | "table";
 
-export interface MetricScope {
-  /** DQL condition on k8s.cluster.uid */
-  clusterCond: string;
-  lookbackHours: number;
+/** One service in one cluster, over the window of the scoring run its row came from. */
+export interface EvidenceScope {
+  clusterUid: string;
+  /** Full k8s.workload.name, e.g. "easytrade-broker-service" */
+  workload: string;
+  /** ISO timestamp: run start (computedAt − lookbackHours) */
+  from: string;
+  /** ISO timestamp: run end (computedAt) */
+  to: string;
+  /** ISO timestamp: start of the compare window (computedAt − currentHours) */
+  split: string;
   currentHours: number;
-  /** Split series/rows by cluster (more than one cluster in scope) */
-  splitByCluster: boolean;
 }
 
-export function metricScope(params: RiskParams): MetricScope {
-  return {
-    clusterCond: clusterCondition(params.clusters),
-    lookbackHours: params.lookbackHours,
-    currentHours: params.currentHours,
-    splitByCluster: params.clusters.length !== 1,
-  };
-}
-
-export interface MetricTileDef {
+export interface MetricTileDef<S> {
   id: string;
-  title: (s: MetricScope) => string;
+  title: (s: S) => string;
   kind: MetricKind;
-  query: (s: MetricScope) => string;
+  query: (s: S) => string;
   /** single-value tiles: the field to display */
   field?: string;
   /** single-value tiles: decimal places */
   decimals?: number;
 }
 
-/** `by` prefix that adds the cluster dimensions when splitting */
-const byCluster = (s: MetricScope) => (s.splitByCluster ? "k8s.cluster.uid, k8s.cluster.name, " : "");
-/** Replaces the cluster dimensions with one readable "cluster" field (cluster names are not unique) */
-const clusterLabel = (s: MetricScope) =>
-  s.splitByCluster
-    ? `| fieldsAdd cluster = concat(coalesce(k8s.cluster.name, "unnamed"), " · ", substring(k8s.cluster.uid, to: 8)) `
-    : "";
-const clusterField = (s: MetricScope) => (s.splitByCluster ? "cluster, " : "");
-const dropClusterDims = (s: MetricScope) => (s.splitByCluster ? "| fieldsRemove k8s.cluster.uid, k8s.cluster.name " : "");
+export type EvidenceDef = MetricTileDef<EvidenceScope>;
 
-export const METRIC_TILES: MetricTileDef[] = [
-  {
-    id: "activeProblems",
-    title: () => "Active Davis problems",
-    kind: "single",
-    field: "activeProblems",
-    decimals: 0,
-    // Not cluster-scoped and not window-scoped: "active" means open right now.
-    query: () =>
-      `fetch dt.davis.problems, from: now()-24h | sort timestamp desc | dedup event.id ` +
-      `| filter event.status == "ACTIVE" | summarize activeProblems = count()`,
-  },
-  {
-    id: "failPct",
-    title: (s) => `Failed requests, last ${s.currentHours}h (%)`,
-    kind: "single",
-    field: "failPct",
-    decimals: 2,
-    query: (s) =>
-      `timeseries {fail = sum(dt.service.request.failure_count, scalar:true), req = sum(dt.service.request.count, scalar:true)}, ` +
-      `filter: ${s.clusterCond}, from: now()-${s.currentHours}h | fieldsAdd failPct = 100 * fail / req | fields failPct`,
-  },
-  {
-    id: "ingressP95",
-    title: (s) => `Ingress p95, last ${s.currentHours}h (ms)`,
-    kind: "single",
-    field: "p95ms",
-    decimals: 1,
-    query: (s) =>
-      `timeseries p95 = percentile(dt.service.request.response_time, 95, scalar:true), ` +
-      `filter: ${s.clusterCond} and k8s.workload.name == "${ns}-frontendreverseproxy", from: now()-${s.currentHours}h ` +
-      `| fieldsAdd p95ms = p95 / 1000 | fields p95ms`,
-  },
-  {
-    id: "p95ByService",
-    title: (s) => `p95 latency by service, ${s.lookbackHours}h (ms)`,
+/** DQL condition selecting one workload in one cluster. Values are quoted, never interpolated raw. */
+const serviceCondition = (s: EvidenceScope) =>
+  `k8s.cluster.uid == ${JSON.stringify(s.clusterUid)} and k8s.workload.name == ${JSON.stringify(s.workload)}`;
+const runWindow = (s: EvidenceScope) => `from:${JSON.stringify(s.from)}, to:${JSON.stringify(s.to)}`;
+
+export const EVIDENCE = {
+  p95: {
+    id: "p95",
+    title: () => "p95 response time (ms)",
     kind: "line",
     query: (s) =>
-      `timeseries p95 = percentile(dt.service.request.response_time, 95), by:{${byCluster(s)}k8s.workload.name}, ` +
-      `filter: ${s.clusterCond}, interval: 15m, from: now()-${s.lookbackHours}h ` +
-      `| fieldsAdd p95ms = p95[] / 1000 ${clusterLabel(s)}` +
-      `| fields timeframe, interval, ${clusterField(s)}k8s.workload.name, p95ms`,
+      `timeseries p95 = percentile(dt.service.request.response_time, 95), filter: ${serviceCondition(s)}, ` +
+      `interval: 15m, ${runWindow(s)} | fieldsAdd p95ms = p95[] / 1000 | fields timeframe, interval, p95ms`,
   },
-  {
-    id: "failRateByService",
-    title: (s) => `Failure rate by service, ${s.lookbackHours}h (%)`,
+  failRate: {
+    id: "failRate",
+    title: () => "Failure rate (%)",
     kind: "line",
     query: (s) =>
       `timeseries {req = sum(dt.service.request.count), fail = sum(dt.service.request.failure_count)}, ` +
-      `by:{${byCluster(s)}k8s.workload.name}, filter: ${s.clusterCond}, interval: 15m, from: now()-${s.lookbackHours}h ` +
-      `| fieldsAdd failPct = 100 * fail[] / req[] ${clusterLabel(s)}` +
-      `| fields timeframe, interval, ${clusterField(s)}k8s.workload.name, failPct`,
+      `filter: ${serviceCondition(s)}, interval: 15m, ${runWindow(s)} ` +
+      `| fieldsAdd failPct = 100 * fail[] / req[] | fields timeframe, interval, failPct`,
   },
-  {
+  failuresByEndpoint: {
     id: "failuresByEndpoint",
-    title: (s) => `Failures by endpoint, ${s.lookbackHours}h`,
+    title: () => "Failures by endpoint",
     kind: "table",
     query: (s) =>
-      `fetch spans, from: now()-${s.lookbackHours}h | filter ${s.clusterCond} and span.kind == "server" and request.is_failed == true ` +
-      `| summarize {failures = count(), last = max(start_time)}, by:{${byCluster(s)}k8s.workload.name, span.name, http.response.status_code} ` +
-      `${clusterLabel(s)}${dropClusterDims(s)}| sort failures desc | limit 25`,
+      `fetch spans, ${runWindow(s)} | filter ${serviceCondition(s)} and span.kind == "server" and request.is_failed == true ` +
+      `| summarize {failures = count(), last = max(start_time)}, by:{span.name, http.response.status_code} ` +
+      `| sort failures desc | limit 25`,
   },
-  {
-    id: "logErrors",
-    title: (s) => `Log errors: baseline vs last ${s.currentHours}h`,
+  logSamples: {
+    id: "logSamples",
+    title: (s) => `Error logs: baseline vs last ${s.currentHours}h`,
     kind: "table",
     query: (s) =>
-      `fetch logs, from: now()-${s.lookbackHours}h | filter k8s.namespace.name == "${ns}" and ${s.clusterCond} ` +
+      `fetch logs, ${runWindow(s)} | filter k8s.namespace.name == "${ns}" and ${serviceCondition(s)} ` +
       `and in(loglevel, array("ERROR", "SEVERE", "FATAL")) ` +
-      `| fieldsAdd period = if(timestamp < now()-${s.currentHours}h, "baseline", else: "last ${s.currentHours}h") ` +
-      `| summarize {errors = count(), sample = takeFirst(substring(content, to: 160))}, by:{${byCluster(s)}k8s.workload.name, period} ` +
-      `${clusterLabel(s)}${dropClusterDims(s)}| sort k8s.workload.name asc`,
+      `| fieldsAdd period = if(timestamp < toTimestamp(${JSON.stringify(s.split)}), "baseline", else: "last ${s.currentHours}h") ` +
+      `| summarize {errors = count(), sample = takeFirst(substring(content, to: 160))}, by:{period} | sort period asc`,
   },
-  {
-    id: "davisProblems",
-    title: (s) => `Davis problems, ${s.lookbackHours}h`,
-    kind: "table",
-    // Not cluster-scoped: problems reference entities, not k8s.cluster.uid.
-    query: (s) =>
-      `fetch dt.davis.problems, from: now()-${s.lookbackHours}h | sort timestamp desc | dedup event.id ` +
-      `| fields display_id, event.name, event.status, event.start, event.end, affected_entity_ids, root_cause_entity_id ` +
-      `| sort event.start desc`,
-  },
-];
+} satisfies Record<string, EvidenceDef>;
